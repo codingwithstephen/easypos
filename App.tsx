@@ -29,8 +29,11 @@ import {
   View,
   Alert,
   useColorScheme,
+  Switch,
+  ScrollView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { StripeProvider, useStripe } from '@stripe/stripe-react-native';
 
 // Storage utility functions with error handling
 const storage = {
@@ -74,6 +77,18 @@ const mockUsers = [
 // Main App component
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
+  // Safely access the Stripe SDK
+  const stripe = useStripe();
+  const initPaymentSheet = stripe?.initPaymentSheet;
+  const presentPaymentSheet = stripe?.presentPaymentSheet;
+  const createToken = stripe?.createToken;
+
+  // Check if Stripe SDK is available
+  useEffect(() => {
+    if (!stripe) {
+      console.error('Stripe SDK could not be found. Make sure @stripe/stripe-react-native is installed correctly.');
+    }
+  }, [stripe]);
 
   // State variables
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -86,14 +101,40 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [showPaymentConfirmation, setShowPaymentConfirmation] = useState(false);
 
+  // Dashboard and navigation state
+  const [showDashboard, setShowDashboard] = useState(true);
+  const [showPaymentScreen, setShowPaymentScreen] = useState(false);
+  const [showBankAccountSetup, setShowBankAccountSetup] = useState(false);
+
+  // Bank account state
+  const [bankAccountName, setBankAccountName] = useState('');
+  const [bankAccountNumber, setBankAccountNumber] = useState('');
+  const [bankRoutingNumber, setBankRoutingNumber] = useState('');
+  const [enableAutoTransfer, setEnableAutoTransfer] = useState(false);
+  const [hasBankAccount, setHasBankAccount] = useState(false);
+
   // Check if user is already logged in using AsyncStorage
   useEffect(() => {
     const checkLoggedInUser = async () => {
       const savedUser = await storage.getItem('user');
       if (savedUser) {
         try {
-          setCurrentUser(JSON.parse(savedUser));
+          const parsedUser = JSON.parse(savedUser);
+          setCurrentUser(parsedUser);
           setIsLoggedIn(true);
+
+          // Load bank account information if it exists
+          if (parsedUser.bankAccount) {
+            setBankAccountName(parsedUser.bankAccount.accountName || '');
+            setBankAccountNumber(parsedUser.bankAccount.accountNumber || '');
+            setBankRoutingNumber(parsedUser.bankAccount.routingNumber || '');
+            setEnableAutoTransfer(parsedUser.bankAccount.autoTransfer || false);
+            setHasBankAccount(
+              !!(parsedUser.bankAccount.accountName && 
+                 parsedUser.bankAccount.accountNumber && 
+                 parsedUser.bankAccount.routingNumber)
+            );
+          }
         } catch (error) {
           console.error('Error parsing user data:', error);
         }
@@ -172,6 +213,13 @@ function App() {
         username,
         password,
         merchantName,
+        bankAccount: {
+          accountName: '',
+          accountNumber: '',
+          routingNumber: '',
+          connected: false,
+          autoTransfer: false,
+        },
       };
 
       // Get existing users from storage or create empty array
@@ -238,23 +286,150 @@ function App() {
     setMerchantName('');
   };
 
+  // Handle saving bank account
+  const handleSaveBankAccount = async () => {
+    try {
+      if (!bankAccountName || !bankAccountNumber || !bankRoutingNumber) {
+        Alert.alert('Invalid Input', 'All fields are required');
+        return;
+      }
+
+      // Check if Stripe SDK is available
+      if (!createToken) {
+        Alert.alert('Error', 'Stripe SDK could not be found. Make sure @stripe/stripe-react-native is installed correctly.');
+        return;
+      }
+
+      // Create a token with Stripe
+      const { token, error } = await createToken({
+        type: 'BankAccount',
+        name: bankAccountName,
+        accountNumber: bankAccountNumber,
+        routingNumber: bankRoutingNumber,
+        country: 'US',
+        currency: 'usd',
+      });
+
+      if (error) {
+        Alert.alert('Error', error.message);
+        return;
+      }
+
+      // Update user with bank account info
+      const updatedUser = {
+        ...currentUser,
+        bankAccount: {
+          accountName: bankAccountName,
+          accountNumber: bankAccountNumber,
+          routingNumber: bankRoutingNumber,
+          connected: true,
+          autoTransfer: enableAutoTransfer,
+          stripeToken: token.id,
+        },
+      };
+
+      // Save updated user to storage
+      const success = await storage.setItem('user', JSON.stringify(updatedUser));
+
+      if (!success) {
+        Alert.alert('Warning', 'Could not save bank account information.');
+        return;
+      }
+
+      // Update stored users array
+      const storedUsersJson = await storage.getItem('users');
+      if (storedUsersJson) {
+        try {
+          const storedUsers = JSON.parse(storedUsersJson);
+          const updatedUsers = storedUsers.map(user => 
+            user.username === updatedUser.username ? updatedUser : user
+          );
+
+          await storage.setItem('users', JSON.stringify(updatedUsers));
+        } catch (error) {
+          console.error('Error updating users array:', error);
+        }
+      }
+
+      // Update state
+      setCurrentUser(updatedUser);
+      setHasBankAccount(true);
+      setShowBankAccountSetup(false);
+      setShowDashboard(true);
+
+      Alert.alert('Success', 'Bank account information saved successfully.');
+    } catch (error) {
+      console.error('Error saving bank account:', error);
+      Alert.alert('Error', 'An error occurred while saving bank account information.');
+    }
+  };
+
   // Handle payment processing
-  const handleProcessPayment = () => {
+  const handleProcessPayment = async () => {
     if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
       Alert.alert('Invalid Amount', 'Please enter a valid amount');
       return;
     }
 
-    // Simulate payment processing
-    setTimeout(() => {
+    try {
+      // Check if Stripe SDK is available
+      if (!initPaymentSheet || !presentPaymentSheet) {
+        Alert.alert('Error', 'Stripe SDK could not be found. Make sure @stripe/stripe-react-native is installed correctly.');
+        return;
+      }
+
+      // Convert amount to cents for Stripe
+      const amountInCents = Math.round(parseFloat(amount) * 100);
+
+      // Initialize the payment sheet in test mode
+      const { error: initError } = await initPaymentSheet({
+        merchantDisplayName: currentUser?.merchantName || 'EasyPOS',
+        // In test mode, we can use the setupIntentClientSecret option instead of paymentIntentClientSecret
+        setupIntentClientSecret: 'seti_1234567890',
+        // Remove customerEphemeralKeySecret as it's not needed in this test configuration
+        customerId: currentUser?.username, // In a real app, you would use a real customer ID
+        testEnv: true, // Use test environment
+      });
+
+      if (initError) {
+        Alert.alert('Error', initError.message);
+        return;
+      }
+
+      // Present the payment sheet
+      const { error: presentError } = await presentPaymentSheet();
+
+      if (presentError) {
+        if (presentError.code === 'Canceled') {
+          // User canceled the payment
+          return;
+        }
+        Alert.alert('Error', presentError.message);
+        return;
+      }
+
+      // Payment successful
+      setShowPaymentScreen(false);
       setShowPaymentConfirmation(true);
-    }, 1000);
+
+      // If auto-transfer is enabled and bank account is connected, transfer the funds
+      if (currentUser?.bankAccount?.autoTransfer && currentUser?.bankAccount?.connected) {
+        Alert.alert(
+          'Auto-Transfer Enabled',
+          `$${parseFloat(amount).toFixed(2)} will be automatically transferred to your bank account.`
+        );
+      }
+    } catch (error) {
+      console.error('Error processing payment:', error);
+      Alert.alert('Error', 'An error occurred while processing the payment.');
+    }
   };
 
   // Reset payment
   const handleNewPayment = () => {
     setAmount('');
     setShowPaymentConfirmation(false);
+    setShowPaymentScreen(true);
   };
 
   // Render login screen
@@ -336,13 +511,47 @@ function App() {
     </View>
   );
 
-  // Render payment screen
-  const renderPaymentScreen = () => (
+  // Render dashboard screen
+  const renderDashboardScreen = () => (
     <View style={styles.formContainer}>
-      <Text style={styles.title}>EasyPOS</Text>
+      <Text style={styles.title}>EasyPOS Dashboard</Text>
       <Text style={styles.subtitle}>
         Welcome, {currentUser?.merchantName || 'Merchant'}
       </Text>
+
+      <TouchableOpacity 
+        style={styles.dashboardButton} 
+        onPress={() => {
+          setShowDashboard(false);
+          setShowBankAccountSetup(true);
+          setShowPaymentScreen(false);
+        }}
+      >
+        <Text style={styles.buttonText}>Enter Bank Details</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={styles.dashboardButton} 
+        onPress={() => {
+          setShowDashboard(false);
+          setShowBankAccountSetup(false);
+          setShowPaymentScreen(true);
+        }}
+      >
+        <Text style={styles.buttonText}>Take Payment</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+        <Text style={styles.buttonText}>Logout</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  // Render payment screen
+  const renderPaymentScreen = () => (
+    <View style={styles.formContainer}>
+      <Text style={styles.title}>Take Payment</Text>
+      <Text style={styles.subtitle}>Enter amount to charge</Text>
 
       <TextInput
         style={styles.amountInput}
@@ -356,10 +565,71 @@ function App() {
         <Text style={styles.buttonText}>Process Payment</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-        <Text style={styles.buttonText}>Logout</Text>
+      <TouchableOpacity 
+        style={styles.secondaryButton} 
+        onPress={() => {
+          setShowDashboard(true);
+          setShowPaymentScreen(false);
+        }}
+      >
+        <Text style={styles.buttonText}>Back to Dashboard</Text>
       </TouchableOpacity>
     </View>
+  );
+
+  // Render bank account setup screen
+  const renderBankAccountSetup = () => (
+    <ScrollView contentContainerStyle={styles.formContainer}>
+      <Text style={styles.title}>Bank Account Setup</Text>
+      <Text style={styles.subtitle}>
+        Enter your bank details to enable automatic transfers
+      </Text>
+
+      <TextInput
+        style={styles.input}
+        placeholder="Account Holder Name"
+        value={bankAccountName}
+        onChangeText={setBankAccountName}
+      />
+
+      <TextInput
+        style={styles.input}
+        placeholder="Account Number"
+        value={bankAccountNumber}
+        onChangeText={setBankAccountNumber}
+        keyboardType="numeric"
+      />
+
+      <TextInput
+        style={styles.input}
+        placeholder="Routing Number"
+        value={bankRoutingNumber}
+        onChangeText={setBankRoutingNumber}
+        keyboardType="numeric"
+      />
+
+      <View style={styles.switchContainer}>
+        <Text style={styles.switchLabel}>Enable Automatic Transfers</Text>
+        <Switch
+          value={enableAutoTransfer}
+          onValueChange={setEnableAutoTransfer}
+        />
+      </View>
+
+      <TouchableOpacity style={styles.button} onPress={handleSaveBankAccount}>
+        <Text style={styles.buttonText}>Save Bank Account</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={styles.secondaryButton} 
+        onPress={() => {
+          setShowDashboard(true);
+          setShowBankAccountSetup(false);
+        }}
+      >
+        <Text style={styles.buttonText}>Back to Dashboard</Text>
+      </TouchableOpacity>
+    </ScrollView>
   );
 
   // Render payment confirmation screen
@@ -374,25 +644,42 @@ function App() {
         <Text style={styles.buttonText}>New Payment</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-        <Text style={styles.buttonText}>Logout</Text>
+      <TouchableOpacity 
+        style={styles.secondaryButton} 
+        onPress={() => {
+          setShowDashboard(true);
+          setShowPaymentScreen(false);
+          setShowPaymentConfirmation(false);
+        }}
+      >
+        <Text style={styles.buttonText}>Back to Dashboard</Text>
       </TouchableOpacity>
     </View>
   );
 
   // Main render function
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+    <StripeProvider
+      publishableKey="pk_test_51NXwqpLkdIwIvLOGVrYUEMXLjJcIy9X5xlmnCEEsjJ5mXWUZlt2NbLhcpHcjA1QQuyWwJ7jyRsZKpuBvRlQ2FvNs00Ht3wCkZP"
+      merchantIdentifier="merchant.com.easypos"
+      urlScheme="easypos"
+    >
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
 
-      {!isLoggedIn ? (
-        isRegistering ? renderRegistrationScreen() : renderLoginScreen()
-      ) : showPaymentConfirmation ? (
-        renderPaymentConfirmation()
-      ) : (
-        renderPaymentScreen()
-      )}
-    </SafeAreaView>
+        {!isLoggedIn ? (
+          isRegistering ? renderRegistrationScreen() : renderLoginScreen()
+        ) : showPaymentConfirmation ? (
+          renderPaymentConfirmation()
+        ) : showBankAccountSetup ? (
+          renderBankAccountSetup()
+        ) : showPaymentScreen ? (
+          renderPaymentScreen()
+        ) : (
+          renderDashboardScreen()
+        )}
+      </SafeAreaView>
+    </StripeProvider>
   );
 }
 
@@ -450,6 +737,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 15,
   },
+  dashboardButton: {
+    width: '100%',
+    height: 70,
+    backgroundColor: '#3498db',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  secondaryButton: {
+    width: '100%',
+    height: 50,
+    backgroundColor: '#2ecc71',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
   logoutButton: {
     width: '100%',
     height: 50,
@@ -466,6 +771,18 @@ const styles = StyleSheet.create({
   linkText: {
     color: '#3498db',
     marginTop: 15,
+  },
+  switchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginBottom: 20,
+    paddingHorizontal: 10,
+  },
+  switchLabel: {
+    fontSize: 16,
+    color: '#2c3e50',
   },
 });
 
