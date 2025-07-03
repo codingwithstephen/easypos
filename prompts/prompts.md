@@ -1,0 +1,1 @@
+give me a specification for a point of sales system which simply allows you to take payments on your phone. Save the specification to /prompts/specification.md
