@@ -113,6 +113,9 @@ function App() {
   const [enableAutoTransfer, setEnableAutoTransfer] = useState(false);
   const [hasBankAccount, setHasBankAccount] = useState(false);
 
+  // Connected account state
+  const [hasConnectedAccount, setHasConnectedAccount] = useState(false);
+
   // Check if user is already logged in using AsyncStorage
   useEffect(() => {
     const checkLoggedInUser = async () => {
@@ -134,6 +137,11 @@ function App() {
                  parsedUser.bankAccount.accountNumber && 
                  parsedUser.bankAccount.routingNumber)
             );
+          }
+
+          // Check if user has a connected account
+          if (parsedUser.stripeConnectedAccount) {
+            setHasConnectedAccount(!!parsedUser.stripeConnectedAccount.accountId);
           }
         } catch (error) {
           console.error('Error parsing user data:', error);
@@ -220,6 +228,13 @@ function App() {
           connected: false,
           autoTransfer: false,
         },
+        stripeConnectedAccount: {
+          accountId: '',
+          accountType: 'standard', // or 'express' or 'custom'
+          onboardingComplete: false,
+          publishableKey: '', // Store if needed
+          secretKey: '', // Store securely if needed
+        },
       };
 
       // Get existing users from storage or create empty array
@@ -286,6 +301,32 @@ function App() {
     setMerchantName('');
   };
 
+  // Create a connected account for the tenant
+  const createConnectedAccount = async (bankAccountDetails) => {
+    try {
+      // In a real app, you would call your backend to create a Stripe Connect account
+      // For this demo, we'll simulate the response
+
+      // Simulate API call delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Generate a fake account ID
+      const accountId = `acct_${Math.random().toString(36).substring(2, 15)}`;
+
+      return {
+        success: true,
+        accountId: accountId,
+        accountType: 'standard',
+        onboardingComplete: false,
+        publishableKey: `pk_test_${accountId}`,
+        secretKey: `sk_test_${accountId}`,
+      };
+    } catch (error) {
+      console.error('Error creating connected account:', error);
+      return { success: false, message: error.message };
+    }
+  };
+
   // Handle saving bank account
   const handleSaveBankAccount = async () => {
     try {
@@ -300,14 +341,19 @@ function App() {
         return;
       }
 
-      // Create a token with Stripe
+      // Create a token with Stripe - using test values that work in test mode
+      // In test mode, use Stripe's test bank account numbers
+      // For US accounts: 000123456789 (success) or 000111111116 (failure)
+      const testAccountNumber = bankAccountNumber || '000123456789';
+      const testRoutingNumber = bankRoutingNumber || '110000000';
+
       const { token, error } = await createToken({
         type: 'BankAccount',
         name: bankAccountName,
-        accountNumber: bankAccountNumber,
-        routingNumber: bankRoutingNumber,
-        country: 'US',
-        currency: 'usd',
+        accountNumber: testAccountNumber,
+        routingNumber: testRoutingNumber,
+        country: 'GB',
+        currency: 'gbp',
       });
 
       if (error) {
@@ -315,7 +361,19 @@ function App() {
         return;
       }
 
-      // Update user with bank account info
+      // Create a connected account
+      const connectedAccountResult = await createConnectedAccount({
+        accountName: bankAccountName,
+        accountNumber: bankAccountNumber,
+        routingNumber: bankRoutingNumber,
+      });
+
+      if (!connectedAccountResult.success) {
+        Alert.alert('Error', connectedAccountResult.message || 'Failed to create connected account');
+        return;
+      }
+
+      // Update user with bank account info and connected account info
       const updatedUser = {
         ...currentUser,
         bankAccount: {
@@ -325,6 +383,13 @@ function App() {
           connected: true,
           autoTransfer: enableAutoTransfer,
           stripeToken: token.id,
+        },
+        stripeConnectedAccount: {
+          accountId: connectedAccountResult.accountId,
+          accountType: connectedAccountResult.accountType,
+          onboardingComplete: connectedAccountResult.onboardingComplete,
+          publishableKey: connectedAccountResult.publishableKey,
+          secretKey: connectedAccountResult.secretKey,
         },
       };
 
@@ -354,10 +419,11 @@ function App() {
       // Update state
       setCurrentUser(updatedUser);
       setHasBankAccount(true);
+      setHasConnectedAccount(true);
       setShowBankAccountSetup(false);
       setShowDashboard(true);
 
-      Alert.alert('Success', 'Bank account information saved successfully.');
+      Alert.alert('Success', 'Bank account information saved and connected account created successfully.');
     } catch (error) {
       console.error('Error saving bank account:', error);
       Alert.alert('Error', 'An error occurred while saving bank account information.');
@@ -381,19 +447,63 @@ function App() {
       // Convert amount to cents for Stripe
       const amountInCents = Math.round(parseFloat(amount) * 100);
 
-      // Initialize the payment sheet in test mode
-      const { error: initError } = await initPaymentSheet({
-        merchantDisplayName: currentUser?.merchantName || 'EasyPOS',
-        // In test mode, we can use the setupIntentClientSecret option instead of paymentIntentClientSecret
-        setupIntentClientSecret: 'seti_1234567890',
-        // Remove customerEphemeralKeySecret as it's not needed in this test configuration
-        customerId: currentUser?.username, // In a real app, you would use a real customer ID
-        testEnv: true, // Use test environment
-      });
+      // Calculate 1% platform fee
+      const applicationFeeAmount = Math.round(amountInCents * 0.01);
+      const merchantAmount = amountInCents - applicationFeeAmount;
 
-      if (initError) {
-        Alert.alert('Error', initError.message);
-        return;
+      // Check if user has a connected account
+      if (!hasConnectedAccount || !currentUser?.stripeConnectedAccount?.accountId) {
+        // If no connected account, process payment normally
+        const { error: initError } = await initPaymentSheet({
+          merchantDisplayName: currentUser?.merchantName || 'EasyPOS',
+          testMode: true,
+          intentConfiguration: {
+            mode: 'payment',
+            amount: amountInCents,
+            currency: 'gbp',
+            setupFutureUsage: undefined,
+          },
+          appearance: {
+            colors: {
+              primary: '#3498db',
+            },
+          },
+        });
+
+        if (initError) {
+          Alert.alert('Error', initError.message);
+          return;
+        }
+      } else {
+        // If connected account exists, process payment with application fee
+        // In a real app, you would call your backend to create a payment intent with application fee
+        // For this demo, we'll simulate it
+
+        // Simulate API call delay
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        const { error: initError } = await initPaymentSheet({
+          merchantDisplayName: currentUser?.merchantName || 'EasyPOS',
+          testMode: true,
+          intentConfiguration: {
+            mode: 'payment',
+            amount: amountInCents,
+            currency: 'gbp',
+            setupFutureUsage: undefined,
+            // For connected accounts, we would specify the application fee
+            applicationFeeAmount: applicationFeeAmount,
+          },
+          appearance: {
+            colors: {
+              primary: '#3498db',
+            },
+          },
+        });
+
+        if (initError) {
+          Alert.alert('Error', initError.message);
+          return;
+        }
       }
 
       // Present the payment sheet
@@ -412,16 +522,42 @@ function App() {
       setShowPaymentScreen(false);
       setShowPaymentConfirmation(true);
 
+      // Show fee breakdown if connected account exists
+      if (hasConnectedAccount) {
+        Alert.alert(
+          'Payment Successful',
+          `Total: £${parseFloat(amount).toFixed(2)}\nPlatform Fee (1%): £${(parseFloat(amount) * 0.01).toFixed(2)}\nYour Earnings: £${(parseFloat(amount) * 0.99).toFixed(2)}`
+        );
+      }
+
       // If auto-transfer is enabled and bank account is connected, transfer the funds
       if (currentUser?.bankAccount?.autoTransfer && currentUser?.bankAccount?.connected) {
-        Alert.alert(
-          'Auto-Transfer Enabled',
-          `$${parseFloat(amount).toFixed(2)} will be automatically transferred to your bank account.`
-        );
+        // Call the handleAutoTransfer function
+        handleAutoTransfer(currentUser.stripeConnectedAccount?.accountId, merchantAmount);
       }
     } catch (error) {
       console.error('Error processing payment:', error);
       Alert.alert('Error', 'An error occurred while processing the payment.');
+    }
+  };
+
+  // Handle automatic transfer to bank account
+  const handleAutoTransfer = async (connectedAccountId, amountInCents) => {
+    try {
+      // In a real app, you would call your backend to initiate a payout to the connected account's bank account
+      // For this demo, we'll simulate it
+
+      // Simulate API call delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Show success message
+      Alert.alert(
+        'Auto-Transfer Initiated',
+        `£${(amountInCents / 100).toFixed(2)} will be transferred to your bank account.`
+      );
+    } catch (error) {
+      console.error('Error with auto-transfer:', error);
+      Alert.alert('Error', 'An error occurred while initiating the auto-transfer.');
     }
   };
 
@@ -511,13 +647,39 @@ function App() {
     </View>
   );
 
+  // Render connected account status
+  const renderConnectedAccountStatus = () => (
+    <View style={styles.statusContainer}>
+      <Text style={styles.statusTitle}>Connected Account Status</Text>
+      {hasConnectedAccount && currentUser?.stripeConnectedAccount?.accountId ? (
+        <>
+          <Text style={styles.statusText}>
+            Account ID: {currentUser.stripeConnectedAccount.accountId.slice(0, 8)}...
+          </Text>
+          <Text style={styles.statusText}>
+            Status: {currentUser.stripeConnectedAccount.onboardingComplete ? 'Active' : 'Pending'}
+          </Text>
+          <Text style={styles.statusText}>
+            Platform Fee: 1% of each transaction
+          </Text>
+        </>
+      ) : (
+        <Text style={styles.statusText}>
+          No connected account. Set up your bank account to create one.
+        </Text>
+      )}
+    </View>
+  );
+
   // Render dashboard screen
   const renderDashboardScreen = () => (
-    <View style={styles.formContainer}>
+    <ScrollView contentContainerStyle={styles.formContainer}>
       <Text style={styles.title}>EasyPOS Dashboard</Text>
       <Text style={styles.subtitle}>
         Welcome, {currentUser?.merchantName || 'Merchant'}
       </Text>
+
+      {renderConnectedAccountStatus()}
 
       <TouchableOpacity 
         style={styles.dashboardButton} 
@@ -527,7 +689,7 @@ function App() {
           setShowPaymentScreen(false);
         }}
       >
-        <Text style={styles.buttonText}>Enter Bank Details</Text>
+        <Text style={styles.buttonText}>{hasBankAccount ? 'Update Bank Details' : 'Enter Bank Details'}</Text>
       </TouchableOpacity>
 
       <TouchableOpacity 
@@ -544,7 +706,7 @@ function App() {
       <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
         <Text style={styles.buttonText}>Logout</Text>
       </TouchableOpacity>
-    </View>
+    </ScrollView>
   );
 
   // Render payment screen
@@ -602,7 +764,7 @@ function App() {
 
       <TextInput
         style={styles.input}
-        placeholder="Routing Number"
+        placeholder="Sort Code"
         value={bankRoutingNumber}
         onChangeText={setBankRoutingNumber}
         keyboardType="numeric"
@@ -637,7 +799,7 @@ function App() {
     <View style={styles.formContainer}>
       <Text style={styles.title}>Payment Successful!</Text>
       <Text style={styles.subtitle}>
-        Amount: ${parseFloat(amount).toFixed(2)}
+        Amount: £{parseFloat(amount).toFixed(2)}
       </Text>
 
       <TouchableOpacity style={styles.button} onPress={handleNewPayment}>
@@ -660,9 +822,10 @@ function App() {
   // Main render function
   return (
     <StripeProvider
-      publishableKey="pk_test_51NXwqpLkdIwIvLOGVrYUEMXLjJcIy9X5xlmnCEEsjJ5mXWUZlt2NbLhcpHcjA1QQuyWwJ7jyRsZKpuBvRlQ2FvNs00Ht3wCkZP"
+      publishableKey="pk_live_51HhXSuF68yUsWhhfdwzOBtHJ7WiZZWEg2XAt5mBAslC2qlW06d7gLKGU4g5cY9DPe7L3DZjqCbQj32nz97PqamVH00tuQPKSzx"
       merchantIdentifier="merchant.com.easypos"
       urlScheme="easypos"
+      dangerouslyGetStripeAccount="acct_1HhXSuF68yUsWhhf" // Add your Stripe account ID for testing
     >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
@@ -783,6 +946,26 @@ const styles = StyleSheet.create({
   switchLabel: {
     fontSize: 16,
     color: '#2c3e50',
+  },
+  statusContainer: {
+    width: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 15,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  statusTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#2c3e50',
+  },
+  statusText: {
+    fontSize: 14,
+    marginBottom: 5,
+    color: '#7f8c8d',
   },
 });
 
