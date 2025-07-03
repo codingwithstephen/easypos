@@ -112,27 +112,37 @@ function App() {
       );
 
       if (user) {
-        // Store user data in AsyncStorage
-        await AsyncStorage.setItem('user', JSON.stringify(user));
+        // Store user data in storage
+        const success = await storage.setItem('user', JSON.stringify(user));
+        if (!success) {
+          Alert.alert('Login Warning', 'Logged in successfully, but could not save session data.');
+        }
 
         setCurrentUser(user);
         setIsLoggedIn(true);
       } else {
-        // Try to get users from AsyncStorage to check if the user exists there
-        const storedUsersJson = await AsyncStorage.getItem('users');
+        // Try to get users from storage to check if the user exists there
+        const storedUsersJson = await storage.getItem('users');
         if (storedUsersJson) {
-          const storedUsers = JSON.parse(storedUsersJson);
-          const storedUser = storedUsers.find(
-            (u) => u.username === username && u.password === password
-          );
+          try {
+            const storedUsers = JSON.parse(storedUsersJson);
+            const storedUser = storedUsers.find(
+              (u) => u.username === username && u.password === password
+            );
 
-          if (storedUser) {
-            // Store current user in AsyncStorage
-            await AsyncStorage.setItem('user', JSON.stringify(storedUser));
+            if (storedUser) {
+              // Store current user in storage
+              const success = await storage.setItem('user', JSON.stringify(storedUser));
+              if (!success) {
+                Alert.alert('Login Warning', 'Logged in successfully, but could not save session data.');
+              }
 
-            setCurrentUser(storedUser);
-            setIsLoggedIn(true);
-            return;
+              setCurrentUser(storedUser);
+              setIsLoggedIn(true);
+              return;
+            }
+          } catch (parseError) {
+            console.error('Error parsing stored users:', parseError);
           }
         }
 
@@ -164,29 +174,38 @@ function App() {
         merchantName,
       };
 
-      // Get existing users from AsyncStorage or create empty array
-      const storedUsersJson = await AsyncStorage.getItem('users');
+      // Get existing users from storage or create empty array
+      const storedUsersJson = await storage.getItem('users');
       let users = [];
 
       if (storedUsersJson) {
-        users = JSON.parse(storedUsersJson);
+        try {
+          users = JSON.parse(storedUsersJson);
 
-        // Check if username already exists
-        const userExists = users.some(user => user.username === username);
-        if (userExists) {
-          Alert.alert('Registration Failed', 'Username already exists');
-          return;
+          // Check if username already exists
+          const userExists = users.some(user => user.username === username);
+          if (userExists) {
+            Alert.alert('Registration Failed', 'Username already exists');
+            return;
+          }
+        } catch (parseError) {
+          console.error('Error parsing stored users:', parseError);
+          // Continue with empty users array
         }
       }
 
       // Add new user to users array
       users.push(newUser);
 
-      // Save updated users array to AsyncStorage
-      await AsyncStorage.setItem('users', JSON.stringify(users));
+      // Save updated users array to storage
+      const usersSuccess = await storage.setItem('users', JSON.stringify(users));
 
-      // Save current user to AsyncStorage
-      await AsyncStorage.setItem('user', JSON.stringify(newUser));
+      // Save current user to storage
+      const userSuccess = await storage.setItem('user', JSON.stringify(newUser));
+
+      if (!usersSuccess || !userSuccess) {
+        Alert.alert('Registration Warning', 'Account created, but there was an issue saving your data. Some features may not work properly.');
+      }
 
       // Update state
       setCurrentUser(newUser);
@@ -203,21 +222,20 @@ function App() {
 
   // Handle logout
   const handleLogout = async () => {
-    try {
-      // Clear user from AsyncStorage
-      await AsyncStorage.removeItem('user');
+    // Clear user from storage
+    const success = await storage.removeItem('user');
 
-      // Update state
-      setIsLoggedIn(false);
-      setCurrentUser(null);
-      setUsername('');
-      setPassword('');
-      setConfirmPassword('');
-      setMerchantName('');
-    } catch (error) {
-      console.error('Error during logout:', error);
-      Alert.alert('Logout Error', 'An error occurred during logout. Please try again.');
+    if (!success) {
+      Alert.alert('Logout Warning', 'There was an issue clearing your session data. You may still be logged in next time you open the app.');
     }
+
+    // Update state regardless of storage success
+    setIsLoggedIn(false);
+    setCurrentUser(null);
+    setUsername('');
+    setPassword('');
+    setConfirmPassword('');
+    setMerchantName('');
   };
 
   // Handle payment processing
